@@ -30,7 +30,8 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "hashicorp.terraform"
+        "hashicorp.terraform",
+				"AmazonWebServices.aws-toolkit-vscode"
       ]
     }
   }
@@ -70,7 +71,8 @@
 		"--network=default-bridge"
 	],
 
-	"postCreateCommand": "terraform --version"
+	// ✅ Run AWS SSM installation and Terraform version check after container setup
+	"postCreateCommand": "/bin/bash /workspaces/aws-dbx-dp/.devcontainer/setup-sm.sh && terraform --version"
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],

@@ -5,7 +5,7 @@ resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "MyVPC" }
+  tags                 = { Name = "MyVPC" }
 }
 
 # ---------------------------
@@ -16,21 +16,21 @@ resource "aws_subnet" "public" {
   cidr_block              = var.public_subnet_cidr
   map_public_ip_on_launch = true
   availability_zone       = data.aws_availability_zones.available.names[0]
-  tags = { Name = "PublicSubnet" }
+  tags                    = { Name = "PublicSubnet" }
 }
 
 resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = var.private_subnet_cidr
   availability_zone = data.aws_availability_zones.available.names[0]
-  tags = { Name = "PrivateSubnet" }
+  tags              = { Name = "PrivateSubnet" }
 }
 
 resource "aws_subnet" "vector" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = var.vector_subnet_cidr
   availability_zone = data.aws_availability_zones.available.names[1]
-  tags = { Name = "VectorSubnet" }
+  tags              = { Name = "VectorSubnet" }
 }
 
 # ---------------------------
@@ -48,6 +48,13 @@ resource "aws_db_subnet_group" "rds_subnet_group" {
 # ---------------------------
 resource "aws_security_group" "ec2_sg" {
   vpc_id = aws_vpc.main.id
+  # ✅ Allow SSH from ANY IP (use a specific IP for security)
+  /*ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # ⚠️ Change this to YOUR IP for security
+  }*/
   egress {
     from_port   = 0
     to_port     = 0
@@ -69,9 +76,81 @@ resource "aws_security_group" "rds_sg" {
 }
 
 # ---------------------------
+# CREATE INTERNET GATEWAY (IGW) FOR PUBLIC ACCESS
+# ---------------------------
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.main.id
+
+  tags = { Name = "InternetGateway" }
+}
+
+# ---------------------------
+# CREATE PUBLIC ROUTE TABLE
+# ---------------------------
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.main.id
+
+  # ✅ Route all traffic (0.0.0.0/0) to the Internet Gateway
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = { Name = "PublicRouteTable" }
+}
+
+# Associate the Public Subnet with the Public Route Table
+resource "aws_route_table_association" "public_assoc" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# ---------------------------
+# CREATE ELASTIC IP (EIP) FOR NAT GATEWAY
+# ---------------------------
+resource "aws_eip" "nat_eip" {
+  domain = "vpc"
+}
+
+# ---------------------------
+# CREATE NAT GATEWAY FOR PRIVATE INSTANCES TO ACCESS THE INTERNET
+# ---------------------------
+resource "aws_nat_gateway" "nat_gw" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.public.id # ✅ NAT is placed in the Public Subnet
+
+  tags = { Name = "NATGateway" }
+
+  depends_on = [aws_internet_gateway.igw]
+}
+
+# ---------------------------
+# CREATE PRIVATE ROUTE TABLE
+# ---------------------------
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.main.id
+
+  # ✅ Route all outbound traffic through the NAT Gateway
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat_gw.id
+  }
+
+  tags = { Name = "PrivateRouteTable" }
+}
+
+# ---------------------------
+# ASSOCIATE THE PRIVATE SUBNET WITH THE PRIVATE ROUTE TABLE
+# ---------------------------
+resource "aws_route_table_association" "private_assoc" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+# ---------------------------
 # CREATE POSTGRESQL RDS INSTANCE
 # ---------------------------
-resource "aws_db_instance" "rds" {
+/*resource "aws_db_instance" "rds" {
   identifier             = "mypostgresdb"
   allocated_storage      = 20
   instance_class         = "db.t3.micro"
@@ -85,4 +164,4 @@ resource "aws_db_instance" "rds" {
   backup_retention_period = 7
   skip_final_snapshot = true
   tags = { Name = "MyPostgresRDS" }
-}
+}*/
