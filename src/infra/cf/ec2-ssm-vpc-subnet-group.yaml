@@ -1,0 +1,82 @@
+Parameters:
+  VPCStackName:
+    Type: String
+    Description: "Name of the CloudFormation stack that created the VPC and subnets"
+
+  MasterUsername:
+    Type: String
+    Description: "Master username for the PostgreSQL RDS instance"
+
+  MasterUserPassword:
+    Type: String
+    NoEcho: true
+    Description: "Master password for the PostgreSQL RDS instance (Sensitive - No Echo)"
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "^[a-zA-Z0-9_]+$"
+    ConstraintDescription: "Must be between 8 and 41 characters, alphanumeric or underscore."
+
+Resources:
+
+  # ✅ Fetch the existing Subnet Group from the VPC stack
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${VPCStackName}-subnet-group"
+      DBSubnetGroupDescription: "Subnet group for PostgreSQL RDS"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VPCStackName}-PrivateSubnet"
+        - Fn::ImportValue: !Sub "${VPCStackName}-VectorSubnet"
+      Tags:
+        - Key: Name
+          Value: "RDSSubnetGroup"
+
+  # ✅ RDS Security Group (Allows EC2 access)
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for PostgreSQL RDS"
+      VpcId:
+        Fn::ImportValue: !Sub "${VPCStackName}-VPCId"
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${VPCStackName}-EC2SecurityGroup"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: RDSSecurityGroup
+
+  # ✅ PostgreSQL RDS Instance (Free Tier)
+  MyPostgresRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: "mypostgresdb"
+      AllocatedStorage: 20
+      DBInstanceClass: "db.t3.micro"
+      Engine: "postgres"
+      EngineVersion: "17.4"
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterUserPassword
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBName: "mypostgresdb"  # ✅ Ensures the database is created automatically
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageType: "gp2"
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: MyPostgresRDS
+
+Outputs:
+  RDSInstanceEndpoint:
+    Description: "PostgreSQL RDS Endpoint"
+    Value: !GetAtt MyPostgresRDS.Endpoint.Address
