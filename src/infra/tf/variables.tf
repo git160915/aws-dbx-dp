@@ -16,5 +16,15 @@ variable "db_password_secret_name" { default = "rds-db-password" }
 # ---------------------------
 # EC2 VARIABLES
 # ---------------------------
-variable "instance_type" { default = "t3.micro" }
-variable "ami_id" { default = "" } # If empty, latest Amazon Linux 2 will be used
+variable "instance_type" { default = "t2.micro" }    # Free tier eligible
+variable "ami_id" { default = "" }                   # If empty, Terraform fetches latest Amazon Linux 2 AMI
+variable "key_pair_name" { default = "my-key-pair" } # Replace with your key pair
+
+# ---------------------------
+# EC2 KEY PAIR
+# ---------------------------
+variable "ec2_key_pair" {
+  description = "The name of the SSH key pair to attach to the EC2 instance"
+  type        = string
+  default     = "MyKeyPair" # Replace with your actual key pair name in AWS
+}

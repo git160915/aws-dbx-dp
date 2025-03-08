@@ -1,82 +1,315 @@
-Parameters:
-  VPCStackName:
-    Type: String
-    Description: "Name of the CloudFormation stack that created the VPC and subnets"
+# AWSTemplateFormatVersion: Specifies the CloudFormation version being used.
+# Description: Provides a summary of the infrastructure being created.
+AWSTemplateFormatVersion: '2010-09-09'
 
-  MasterUsername:
-    Type: String
-    Description: "Master username for the PostgreSQL RDS instance"
-
-  MasterUserPassword:
-    Type: String
-    NoEcho: true
-    Description: "Master password for the PostgreSQL RDS instance (Sensitive - No Echo)"
-    MinLength: 8
-    MaxLength: 41
-    AllowedPattern: "^[a-zA-Z0-9_]+$"
-    ConstraintDescription: "Must be between 8 and 41 characters, alphanumeric or underscore."
+# This CloudFormation template creates:
+# ✅ A VPC with private & public subnets
+# ✅ An EC2 instance in a private subnet with SSM access
+# ✅ Networking (IGW, NAT, Routes) to allow outbound internet access
+# ✅ A security group restricting traffic
+Description: 'Create an EC2 instance in a private subnet with SSM access, and a second subnet for high availability'
 
 Resources:
 
-  # ✅ Fetch the existing Subnet Group from the VPC stack
-  RDSSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
+  # VPC
+  # CidrBlock: Defines the IP range (10.0.0.0/16) for the VPC.
+  # EnableDnsSupport: Enables DNS resolution for instances inside the VPC.
+  # EnableDnsHostnames: Enables hostnames for instances launched inside the VPC.
+  # Tags: Adds a human-readable name (MyVPC).
+  MyVPC:
+    Type: AWS::EC2::VPC
     Properties:
-      DBSubnetGroupName: !Sub "${VPCStackName}-subnet-group"
-      DBSubnetGroupDescription: "Subnet group for PostgreSQL RDS"
-      SubnetIds:
-        - Fn::ImportValue: !Sub "${VPCStackName}-PrivateSubnet"
-        - Fn::ImportValue: !Sub "${VPCStackName}-VectorSubnet"
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: "RDSSubnetGroup"
+          Value: MyVPC
 
-  # ✅ RDS Security Group (Allows EC2 access)
-  RDSSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  # Public Subnet (AZ1) - For NAT Gateway
+  # VpcId: Associates the subnet with the MyVPC VPC.
+  # CidrBlock: Assigns the subnet a /24 range (10.0.1.0/24).
+  # MapPublicIpOnLaunch: Enables automatic public IP assignment.
+  # AvailabilityZone: Picks the first availability zone dynamically.
+  # Purpose: Used to host a NAT Gateway for private instances to access the internet.
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
     Properties:
-      GroupDescription: "Security group for PostgreSQL RDS"
-      VpcId:
-        Fn::ImportValue: !Sub "${VPCStackName}-VPCId"
-      SecurityGroupIngress:
-        - IpProtocol: "tcp"
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId:
-            Fn::ImportValue: !Sub "${VPCStackName}-EC2SecurityGroup"
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+
+  # Private Subnet (AZ1) - For EC2 Instance
+  # MapPublicIpOnLaunch: Set to false, meaning instances will not receive public IPs.
+  # Purpose: Hosts an EC2 instance, which accesses the internet via the NAT Gateway.
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet
+
+  # Vector Subnet (AZ2) - Second Availability Zone
+  # Purpose: Used as an additional subnet in a second AZ for high availability.
+  VectorSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      Tags:
+        - Key: Name
+          Value: VectorSubnet
+
+  # Subnet Group (for databases or distributed workloads)
+  # Creates an RDS Subnet Group: Required for RDS instances in a multi-AZ setup.
+  # Uses Private and Vector subnets for high availability.
+  MySubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    DependsOn:
+      - PrivateSubnet
+      - VectorSubnet
+    Properties:
+      DBSubnetGroupName: my-subnet-group
+      DBSubnetGroupDescription: 'Subnet group for high availability'
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref VectorSubnet
+      Tags:
+        - Key: Name
+          Value: MySubnetGroup
+
+  # Internet Gateway
+  # Allows traffic from the public internet to enter the VPC.
+  MyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyInternetGateway
+
+  # Attach Internet Gateway to VPC
+  # Links the internet gateway to the VPC, enabling external access.
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref MyInternetGateway
+
+  # Elastic IP for NAT Gateway
+  # Provides a fixed public IP for the NAT Gateway.
+  NatEIP:
+    Type: AWS::EC2::EIP
+
+  # NAT Gateway (Allows Private Subnet to Reach the Internet)
+  # Allows private instances to reach the internet without having public IPs.
+  # Hosted in the public subnet.
+  MyNATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: AttachGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  # Public Route Table
+  # Defines routes for the public subnet.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: MyVPC
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  # Route for Public Subnet (Internet Gateway)
+  # Routes public traffic through the Internet Gateway.
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: MyVPC
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyInternetGateway
+
+  # Associate Public Subnet with Public Route Table
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  # Route for Private Subnet (Using NAT Gateway)
+  # Routes private traffic through the NAT Gateway.
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref MyNATGateway
+
+  # Associate Private Subnet with Private Route Table
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Group for EC2 (Outbound only)
+  # Only allows outbound traffic (inbound rules not specified).
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: MyVPC
+    Properties:
+      GroupDescription: 'Allow outbound traffic only'
+      VpcId: !Ref MyVPC
       SecurityGroupEgress:
         - IpProtocol: "-1"
           FromPort: 0
           ToPort: 65535
           CidrIp: "0.0.0.0/0"
-      Tags:
-        - Key: Name
-          Value: RDSSecurityGroup
 
-  # ✅ PostgreSQL RDS Instance (Free Tier)
-  MyPostgresRDS:
-    Type: AWS::RDS::DBInstance
+  # IAM Role for SSM Access
+  # Allows EC2 to be accessed via AWS Systems Manager (SSM) Session Manager.
+  # Removes the need for SSH key-pairs.
+  SSMIAMRole:
+    Type: AWS::IAM::Role
     Properties:
-      DBInstanceIdentifier: "mypostgresdb"
-      AllocatedStorage: 20
-      DBInstanceClass: "db.t3.micro"
-      Engine: "postgres"
-      EngineVersion: "17.4"
-      MasterUsername: !Ref MasterUsername
-      MasterUserPassword: !Ref MasterUserPassword
-      DBSubnetGroupName: !Ref RDSSubnetGroup
-      VPCSecurityGroups:
-        - !Ref RDSSecurityGroup
-      DBName: "mypostgresdb"  # ✅ Ensures the database is created automatically
-      PubliclyAccessible: false
-      MultiAZ: false
-      StorageType: "gp2"
-      BackupRetentionPeriod: 7
+      RoleName: EC2SSMRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ec2.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # IAM Instance Profile (Attach IAM Role to EC2)
+  # Runs inside a private subnet.
+  # Uses SSM for access instead of SSH.
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: EC2SSMInstanceProfile
+      Roles:
+        - !Ref SSMIAMRole
+
+  # EC2 Instance in Private Subnet
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId  # Latest Amazon Linux 2 AMI
+      SubnetId: !Ref PrivateSubnet
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
       Tags:
         - Key: Name
-          Value: MyPostgresRDS
+          Value: EC2-SSM-PrivateInstance
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          set -e
+          echo "🔹 Detecting OS and installing PostgreSQL Client (psql)..."
 
+          # Detect OS using /etc/os-release
+          if [ -f /etc/os-release ]; then
+              . /etc/os-release
+              OS_ID=$ID
+              OS_VERSION=$VERSION_ID
+          else
+              echo "⚠️ Unable to detect OS. Exiting."
+              exit 1
+          fi
+
+          echo "🔹 Detected OS: $OS_ID $OS_VERSION"
+
+          case "$OS_ID" in
+              "amzn")
+                  echo "🔹 Installing PostgreSQL for Amazon Linux ($OS_VERSION)..."
+                  if [[ "$OS_VERSION" == "2" ]]; then
+                      sudo amazon-linux-extras enable postgresql14
+                      sudo yum clean metadata
+                      sudo yum install -y postgresql
+                  else
+                      sudo dnf install -y postgresql
+                  fi
+                  ;;
+              "ubuntu" | "debian")
+                  echo "🔹 Installing PostgreSQL for Ubuntu/Debian..."
+                  sudo apt-get update -y
+                  sudo apt-get install -y postgresql-client
+                  ;;
+              "rhel" | "centos")
+                  echo "🔹 Installing PostgreSQL for RHEL/CentOS..."
+                  sudo yum update -y
+                  sudo yum install -y postgresql
+                  ;;
+              *)
+                  echo "⚠️ Unsupported OS: $OS_ID. Please install PostgreSQL manually."
+                  exit 1
+                  ;;
+          esac
+
+          echo "✅ PostgreSQL Client (psql) installation complete."
+
+# Get the latest Amazon Linux 2 AMI
+Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+# Exports IDs of created resources.
 Outputs:
-  RDSInstanceEndpoint:
-    Description: "PostgreSQL RDS Endpoint"
-    Value: !GetAtt MyPostgresRDS.Endpoint.Address
+  VPCId:
+    Description: "VPC ID"
+    Value: !Ref MyVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+
+  PrivateSubnet:
+    Description: "Private Subnet ID"
+    Value: !Ref PrivateSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnet"
+
+  VectorSubnet:
+    Description: "Vector Subnet ID"
+    Value: !Ref VectorSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-VectorSubnet"
+
+  MySubnetGroup:
+    Description: "RDS Subnet Group Name"
+    Value: !Ref MySubnetGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-MySubnetGroup"
+
+  EC2SecurityGroup:
+    Description: "EC2 Security Group ID"
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-EC2SecurityGroup"
