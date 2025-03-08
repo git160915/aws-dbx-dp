@@ -8,10 +8,10 @@ output "private_subnet_id" {
   description = "Private Subnet ID"
 }
 
-/*output "rds_endpoint" {
+output "rds_endpoint" {
   value       = aws_db_instance.rds.endpoint
   description = "PostgreSQL RDS Endpoint"
-}*/
+}
 
 output "ec2_instance_id" {
   value       = aws_instance.ec2.id
