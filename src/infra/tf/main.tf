@@ -150,7 +150,7 @@ resource "aws_route_table_association" "private_assoc" {
 # ---------------------------
 # CREATE POSTGRESQL RDS INSTANCE
 # ---------------------------
-/*resource "aws_db_instance" "rds" {
+resource "aws_db_instance" "rds" {
   identifier             = "mypostgresdb"
   allocated_storage      = 20
   instance_class         = "db.t3.micro"
@@ -164,4 +164,4 @@ resource "aws_route_table_association" "private_assoc" {
   backup_retention_period = 7
   skip_final_snapshot = true
   tags = { Name = "MyPostgresRDS" }
-}*/
+}
